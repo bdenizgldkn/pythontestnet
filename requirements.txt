@@ -1,4 +1,4 @@
-python-binance
-numpy
 pandas
+numpy
+pybit
 websocket-client
