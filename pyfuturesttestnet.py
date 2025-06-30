@@ -2,166 +2,189 @@ import websocket
 import json
 import numpy as np
 import pandas as pd
-from binance.client import Client
-from binance.enums import *
+# DÜZELTME: Kütüphanenin yeni yapısına uygun importlar
+from pybit.unified_trading import HTTP, WebSocket
 import time
 import os
 import threading
 
-# --- YAPILANDIRMA ---
-# Ayarlar artık doğrudan kodda değil, sunucu ortam değişkenlerinden okunacak.
+# --- YAPILANDIRMA (Lütfen bu bölümü düzenleyin) ---
 
-API_KEY = os.environ.get('API_KEY')
-API_SECRET = os.environ.get('API_SECRET')
+# 1. Adım: Bybit Testnet API anahtarlarınızı buraya yapıştırın.
+API_KEY = "MZr3w7OFXXDGPdnjXt" 
+API_SECRET = "iWpurP32egvhLPqnJIYCBJVjnjnWSGIGzT00"
 
-# Strateji Parametreleri
+# 2. Adım: İşlem yapılacak parite ve strateji parametreleri
 SYMBOL = 'DOGEUSDT'
 LEVERAGE = 10
-RSI_PERIOD = 14
+RSI_PERIOD = 1
 RSI_OVERSOLD = 30
-TAKE_PROFIT_PCT = 0.10
-STOP_LOSS_PCT = 0.03
-TRADE_USDT_AMOUNT = 10
-INTERVAL = Client.KLINE_INTERVAL_1MINUTE
+TAKE_PROFIT_PCT = 0.10  # %10 kar
+STOP_LOSS_PCT = 0.03    # %3 zarar
+TRADE_USDT_AMOUNT = 1000  # Her işlemde kullanılacak sanal USDT miktarı
+INTERVAL = "1" # 1 dakikalık mumlar için Bybit formatı
 
-# --- BOT KODU ---
+# --- BOT KODU (Bu bölümü değiştirmenize gerek yok) ---
 
-TESTNET_URL_FUTURES = "https://testnet.binancefuture.com"
-TESTNET_SOCKET_URL_FUTURES = f"wss://stream.binancefuture.com/ws/{SYMBOL.lower()}@kline_{INTERVAL}"
-
+# Global Değişkenler
 closes = []
 in_position = False
-client = None
+session = None
 
 def check_open_positions():
+    """Mevcut açık pozisyon olup olmadığını kontrol eder."""
     global in_position
     try:
-        positions = client.futures_position_information(symbol=SYMBOL)
-        position_found = any(p['symbol'] == SYMBOL and float(p['positionAmt']) > 0 for p in positions)
-        if position_found:
-            if not in_position: print(f"Mevcut açık pozisyon bulundu.")
-            in_position = True
+        # DÜZELTME: Yeni API yapısına uygun pozisyon sorgusu
+        positions = session.get_positions(category="linear", symbol=SYMBOL)
+        if 'result' in positions and len(positions['result']['list']) > 0 and float(positions['result']['list'][0]['size']) > 0:
+             if not in_position:
+                 print(f"Mevcut açık pozisyon bulundu: {positions['result']['list'][0]['size']} {SYMBOL}")
+             in_position = True
         else:
-            if in_position: print("Açık pozisyon yok. Sinyal bekleniyor...")
-            in_position = False
+             if in_position:
+                 print("Açık pozisyon yok. Sinyal bekleniyor...")
+             in_position = False
     except Exception as e:
         print(f"Pozisyon kontrolü sırasında hata: {e}")
         in_position = False
 
-def calculate_rsi(data):
-    if len(data) < RSI_PERIOD: return None
+def calculate_rsi(data, period=14):
+    """RSI değerini hesaplar."""
+    if len(data) < period:
+        return None
+    
     df = pd.DataFrame(data, columns=['close'])
     delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
-    if loss.iloc[-1] == 0: return 100
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    
+    if loss.iloc[-1] == 0:
+        return 100
+        
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
 
 def place_order_with_tp_sl():
+    """Alım emri ve ilişkili TP/SL emirlerini yerleştirir."""
     global in_position
     try:
-        ticker = client.futures_ticker(symbol=SYMBOL)
-        last_price = float(ticker['lastPrice'])
-        quantity = round(TRADE_USDT_AMOUNT / last_price * LEVERAGE, 3)
+        ticker = session.get_tickers(category="linear", symbol=SYMBOL)
+        last_price = float(ticker['result']['list'][0]['lastPrice'])
         
+        quantity = str(round(TRADE_USDT_AMOUNT / last_price * LEVERAGE, 3))
+        
+        tp_price = str(round(last_price * (1 + TAKE_PROFIT_PCT / LEVERAGE), 4))
+        sl_price = str(round(last_price * (1 - STOP_LOSS_PCT / LEVERAGE), 4))
+
         print(f"\n--- YENİ İŞLEM BAŞLATILIYOR ---")
         print(f"Fiyat: {last_price}, Miktar: {quantity} {SYMBOL}")
+        print(f"Hedefler: Kâr Al (TP) @ {tp_price}, Zarar Durdur (SL) @ {sl_price}")
 
-        client.futures_create_order(symbol=SYMBOL, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
-        print("Piyasa Alış Emri Başarıyla Verildi.")
-        time.sleep(1)
+        # DÜZELTME: Yeni API yapısına uygun emir verme
+        response = session.place_order(
+            category="linear",
+            symbol=SYMBOL,
+            side="Buy",
+            orderType="Market",
+            qty=quantity,
+            takeProfit=tp_price,
+            stopLoss=sl_price
+        )
         
-        positions = client.futures_position_information(symbol=SYMBOL)
-        entry_price = next((float(p['entryPrice']) for p in positions if p['symbol'] == SYMBOL), 0)
-        if entry_price == 0: raise Exception("Giriş fiyatı alınamadı.")
+        if response.get('retMsg') == 'OK' or response.get('retMsg') == '':
+            print("Piyasa Alış Emri ve TP/SL hedefleri başarıyla verildi.")
+            in_position = True
+            print("--- İŞLEM AKTİF, SONUÇ BEKLENİYOR ---\n")
+        else:
+            print(f"Emir verme sırasında hata: {response.get('retMsg')}")
+            in_position = False
 
-        print(f"Pozisyona Giriş Fiyatı: {entry_price}")
-        in_position = True
-
-        tp_price = round(entry_price * (1 + TAKE_PROFIT_PCT / LEVERAGE), 4)
-        client.futures_create_order(symbol=SYMBOL, side=SIDE_SELL, type='TAKE_PROFIT_MARKET', stopPrice=tp_price, closePosition=True)
-        print(f"Kar Al (Take Profit) Emri {tp_price} seviyesine kuruldu.")
-
-        sl_price = round(entry_price * (1 - STOP_LOSS_PCT / LEVERAGE), 4)
-        client.futures_create_order(symbol=SYMBOL, side=SIDE_SELL, type='STOP_MARKET', stopPrice=sl_price, closePosition=True)
-        print(f"Zarar Durdur (Stop Loss) Emri {sl_price} seviyesine kuruldu.")
-        print("--- İŞLEM AKTİF, SONUÇ BEKLENİYOR ---\n")
     except Exception as e:
         print(f"Emir verme sırasında bir hata oluştu: {e}")
         in_position = False
 
-def on_message(ws, message):
+def handle_message(msg):
+    """Websocket'ten gelen her mesajda tetiklenir."""
     global closes
-    json_message = json.loads(message)
-    if 'e' in json_message and json_message['e'] == 'kline':
-        kline = json_message['k']
-        if kline['x']: # Mum kapandı mı?
-            close_price = float(kline['c'])
+    
+    if 'topic' in msg and msg['topic'] == f'kline.{INTERVAL}.{SYMBOL}':
+        kline = msg['data'][0]
+        is_kline_closed = kline['confirm']
+        close_price = float(kline['close'])
+        
+        if is_kline_closed:
             print(f"Mum kapandı: {close_price}", end=' | ')
             closes.append(close_price)
-            if len(closes) > 100: closes.pop(0)
-            
+            if len(closes) > 100:
+                closes.pop(0)
+
             if not in_position:
-                rsi = calculate_rsi(closes)
+                rsi = calculate_rsi(closes, RSI_PERIOD)
                 if rsi is not None:
                     print(f"RSI: {rsi:.2f}")
                     if rsi < RSI_OVERSOLD:
                         print(f"\n>>> ALIM SİNYALİ! RSI ({rsi:.2f}) < {RSI_OVERSOLD} <<<\n")
                         place_order_with_tp_sl()
                 else:
-                    print("RSI için veri toplanıyor...")
+                    print("RSI hesaplamak için yeterli veri toplanıyor...")
             else:
-                 print("Pozisyon açık, TP/SL bekleniyor.")
-
-def position_check_loop():
-    while True:
-        if client: check_open_positions()
-        time.sleep(10)
-
-def on_open(ws):
-    print("Binance FUTURES Testnet ile bağlantı kuruldu.")
-    checker_thread = threading.Thread(target=position_check_loop, daemon=True)
-    checker_thread.start()
+                 print("Pozisyon açık, yeni sinyal aranmıyor. TP/SL bekleniyor.")
 
 def main():
-    global client
-    print("Bot başlatılıyor...")
-    
-    if not API_KEY or not API_SECRET:
-        print("\n!!! HATA: API_KEY ve API_SECRET ortam değişkenleri bulunamadı.")
-        print("Lütfen Render.com'daki 'Environment' ayarlarını kontrol edin.")
+    """Botun ana çalışma fonksiyonu."""
+    global session
+    print("Bybit Testnet Botu başlatılıyor (Güncel Sürüm)...")
+
+    if "SENİN_BYBIT_TESTNET_API_ANAHTARIN" in API_KEY or "SENİN_BYBIT_TESTNET_GİZLİ_ANAHTARIN" in API_SECRET:
+        print("\n!!! UYARI: Lütfen kodun içindeki API_KEY ve API_SECRET alanlarını kendi Bybit Testnet anahtarlarınızla güncelleyin.\n")
         return
 
-    client = Client(API_KEY, API_SECRET)
-    client.API_URL = TESTNET_URL_FUTURES
+    # DÜZELTME: Yeni API yapısına uygun oturum başlatma
+    session = HTTP(testnet=True, api_key=API_KEY, api_secret=API_SECRET)
+    ws = WebSocket(testnet=True, channel_type="linear", api_key=API_KEY, api_secret=API_SECRET)
     
+    # Başlangıçta kaldıraç ayarını yap
     try:
-        print("Hesap bilgileri doğrulanıyor...")
-        client.futures_account_balance()
-        print("API Anahtarları geçerli.")
-    except Exception as e:
-        print(f"API Anahtarları ile doğrulama başarısız: {e}")
-        return
-
-    try:
-        client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+        session.set_leverage(category="linear", symbol=SYMBOL, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
         print(f"{SYMBOL} için kaldıraç {LEVERAGE}x olarak ayarlandı.")
     except Exception as e:
-        print(f"Kaldıraç ayarlanırken hata: {e}")
+        print(f"Kaldıraç ayarlanırken hata (zaten ayarlı olabilir): {e}")
 
+    # RSI'ı "ısıtmak" için geçmiş verileri çek
     try:
-        print("Geçmiş veriler çekiliyor...")
-        klines = client.futures_klines(symbol=SYMBOL, interval=INTERVAL, limit=100)
-        for k in klines: closes.append(float(k[4]))
+        print("RSI hesaplaması için geçmiş veriler çekiliyor...")
+        klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=100)['result']['list']
+        # Bybit verileri ters sırada verir, düzeltelim
+        klines.reverse()
+        for k in klines:
+            closes.append(float(k[4])) # Kapanış fiyatı 4. index'te
         print("Geçmiş veriler başarıyla çekildi.")
     except Exception as e:
         print(f"Geçmiş veri çekilirken hata: {e}")
         return
 
-    ws = websocket.WebSocketApp(TESTNET_SOCKET_URL_FUTURES, on_open=on_open, on_message=on_message)
-    ws.run_forever()
+    # Periyodik pozisyon kontrolü için thread başlat
+    def position_check_loop():
+        while True:
+            check_open_positions()
+            time.sleep(10)
+
+    checker_thread = threading.Thread(target=position_check_loop, daemon=True)
+    checker_thread.start()
+
+    # Kline verilerini dinle
+    ws.kline_stream(
+        callback=handle_message,
+        symbol=SYMBOL,
+        interval=INTERVAL,
+    )
+
+    print("Bağlantı kuruldu. Sinyal bekleniyor...")
+    while True:
+        time.sleep(1)
+
 
 if __name__ == "__main__":
     main()
